@@ -85,6 +85,54 @@ func (ec *ErrorCollector) Err() error {
 }
 ```
 
+**Bounded concurrent error collection (BoundedGroup):**
+
+When a controller reconciles many resources in parallel, one bad resource can
+report the same failure over and over. `BoundedGroup` collects errors from
+concurrent tasks with a fixed retention limit, optional deduplication by source
+key, and a deterministic result order:
+
+```go
+g := multierror.NewBoundedGroup(100,
+    multierror.WithContext(ctx), // optional: cancel Wait and stop collecting
+)
+
+for _, resource := range resources {
+    resource := resource
+    g.GoKeyed(resource.ID, func() error {
+        return reconcile(ctx, resource)
+    })
+}
+
+err := g.Wait()
+if err != nil {
+    // err is a *multierror.Error; errors.Is/As work for every retained cause.
+    if g.Omitted() > 0 {
+        log.Printf("%d further failures were counted but not stored", g.Omitted())
+    }
+}
+```
+
+Key properties:
+
+- At most `limit` errors are retained. Extra failures are discarded without
+  blocking the worker; only their count is kept (`Omitted()`), and the
+  formatted error ends with a truncation summary. A limit of zero or less means
+  unlimited, like the zero value; `SetLimit` adjusts it at runtime.
+- `GoKeyed` records one failure per source key by default. Repeated failures
+  from the same resource are dropped, so the result shows *which* resources
+  failed rather than how many times. Use `WithoutDedupe()` to keep every error
+  until the limit is reached.
+- `Wait` returns errors ordered by source key (then message), independent of
+  completion order. Repeated `Wait` calls return the same snapshot without
+  double counting.
+- Cancelling the context passed to `WithContext` stops collection and wakes
+  `Wait`; running tasks finish normally and are safely reclaimed.
+- No background goroutines are started; the only goroutines are the
+  per-task ones created by `Go`/`GoKeyed`.
+
+The zero value retains every error, like `Group`. `Group` itself is unchanged.
+
 ---
 
 `go-multierror` is a package for Go that provides a mechanism for
